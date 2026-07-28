@@ -82,26 +82,37 @@ cp .env.example .env
 nano .env
 ```
 
-关键配置项：
+#### 🔑 关键配置项说明
 
-```env
-# API 认证密钥（请修改为复杂字符串）
-API_MASTER_KEY="sk-your-secret-key-here"
+`.env.example` 中已包含完整的配置指引，以下为关键项摘要：
 
-# 豆包 Cookie（必填）
-DOUBAO_COOKIE_1="your_doubao_cookie_here"
+| 配置项 | 说明 | 必填 |
+|--------|------|------|
+| `API_MASTER_KEY` | API 认证密钥，请修改为复杂字符串 | ✅ |
+| `DOUBAO_COOKIE_1` | 豆包登录 Cookie 完整字符串 | ✅ |
+| `DOUBAO_DEVICE_ID` | 设备唯一标识 (19位数字) | ✅ |
+| `DOUBAO_FP` | 浏览器指纹 (verify_ 开头) | ✅ |
+| `DOUBAO_TEA_UUID` | 设备 Tea UUID (19位数字) | ✅ |
+| `DOUBAO_WEB_ID` | Web 设备 ID (通常与 TEA_UUID 相同) | ✅ |
 
-# 可选：多账号支持
-DOUBAO_COOKIE_2="another_cookie_here"
-DOUBAO_COOKIE_3="third_cookie_here"
-```
+#### 🔍 获取 Cookie 和设备指纹
 
-#### 🔍 获取 Cookie 教程
+**获取 Cookie：**
 
 1. 使用 Chrome/Edge 浏览器登录 [豆包官网](https://www.doubao.com/chat/)
-2. 按 `F12` 打开开发者工具 → 切换到 **Network** 标签
-3. 发送任意消息 → 筛选 `completion` 请求
-4. 右键复制为 cURL → 提取 Cookie 字段
+2. 按 `F12` 打开开发者工具 → 切换到 **Console** 标签
+3. 输入 `document.cookie` 并回车，复制输出的完整字符串
+4. 粘贴到 `.env` 的 `DOUBAO_COOKIE_1` 中
+5. **⚠️ 检查 Cookie 中是否包含 `$` 字符，若有，必须全部替换为 `$$`**（Docker Compose 会将 `$` 解释为变量引用，`$$` 才是转义后的字面量 `$`）
+
+**获取设备指纹（推荐方法）：**
+
+1. 在同一浏览器中，切换到 **Network** 标签
+2. 发送一条消息，筛选包含 `completion` 的 XHR/Fetch 请求
+3. 点击该请求 → **Payload** → **Query String Parameters**
+4. 复制 `device_id`、`fp`、`tea_uuid`、`web_id` 的值，填入 `.env` 对应字段
+
+> 💡 **提示**：`.env.example` 文件末尾包含完整的 [设备指纹提取指南](#) 和故障排查方法。如遇 `rate limited` 或滑块验证，请优先使用 Network 面板提取（方法一），而非从 Cookie/JWT 中推断（方法二）。
 
 ### 第三步：启动服务
 
@@ -194,18 +205,23 @@ graph TB
 ### 签名生成流程
 
 ```python
-# 伪代码示例
+# 伪代码示例（v1.1 已兼容两种命名空间）
 async def generate_signature(params):
     # 1. 通过 Playwright 调用浏览器环境
+    # 注意：豆包可能更新 SDK 命名空间，本项目已兼容：
+    #   - byted_acrawler.frontierSign (旧)
+    #   - bdms.frontierSign (新)
     signature = await page.evaluate("""
         (params) => {
-            return window.byted_acrawler.frontierSign(params);
+            const signFn = window.byted_acrawler?.frontierSign
+                        || window.bdms?.frontierSign;
+            return signFn(params);
         }
     """, params)
-    
+
     # 2. 将签名附加到请求 URL
     url = f"https://www.doubao.com/api?{params}&a_bogus={signature}"
-    
+
     # 3. 发送请求
     response = await httpx.post(url, cookies=cookies)
     return response
@@ -308,13 +324,25 @@ doubao-2api/
 **Q: 服务启动失败怎么办？**
 **A:** 检查以下项目：
 1. Docker 和 docker-compose 是否正常安装
-2. `.env` 文件中的 Cookie 是否有效
-3. 服务器网络能否访问豆包官网
+2. `.env` 文件中的 Cookie 和设备指纹是否有效（必须来自同一次浏览器抓包）
+3. Cookie 中的 `$` 是否已转义为 `$$`
+4. 服务器网络能否访问豆包官网
+5. 查看日志：`docker-compose logs app`
 
-**Q: 请求返回签名错误？**  
+**Q: Docker Compose 启动时报 "$xxx is not set" 警告？**  
+**A:** Cookie 中含有 `$` 字符（常见于 `_ga_G8EP5CG8VZ` 等 Google Analytics Cookie）。将 Cookie 值中所有的 `$` 替换为 `$$` 即可。
+
+**Q: 日志显示"等待签名函数超时"？**  
 **A:** 通常是因为：
-1. Cookie 过期 - 重新获取最新 Cookie
-2. 浏览器实例异常 - 重启服务 `docker-compose restart`
+1. Cookie 过期 — 重新获取最新 Cookie
+2. 设备指纹与 Cookie 不匹配 — 确保从同一次浏览器会话中提取
+3. 签名函数命名空间已变更 — 本项目 v1.1 已兼容 `bdms.frontierSign`
+
+**Q: 请求返回 `rate limited` 或空内容？**  
+**A:** 触发了豆包的反爬机制（滑块验证）。常见原因：
+1. 设备指纹不够精确 — 建议使用 Network 面板提取（方法一）而非 Cookie/JWT 推断
+2. 请求频率过高 — 降低并发数
+3. IP 被限流 — 更换 IP 或等待冷却
 
 **Q: 如何查看服务日志？**
 **A:** 使用命令：

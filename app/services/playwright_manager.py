@@ -114,12 +114,28 @@ class PlaywrightManager:
                 raise RuntimeError("无法访问豆包官网，初始化失败。") from e
 
             try:
-                logger.info("正在等待关键签名函数 (window.byted_acrawler.frontierSign) 加载 (超时时间: 30秒)...")
+                logger.info("正在等待关键签名函数加载 (超时时间: 30秒)...")
+                current_url = self.page.url
+                current_title = await self.page.title()
+                logger.info(f"当前页面 URL: {current_url}")
+                logger.info(f"当前页面标题: {current_title}")
+
+                # 检查新旧两种签名函数位置 (byted_acrawler 或 bdms)
+                sig_check = await self.page.evaluate("""
+                    () => {
+                        const oldPath = typeof window.byted_acrawler?.frontierSign;
+                        const newPath = typeof window.bdms?.frontierSign;
+                        return JSON.stringify({oldPath, newPath});
+                    }
+                """)
+                logger.info(f"签名函数检查: {sig_check}")
+
+                # 等待签名函数 (支持新旧两种命名空间)
                 await self.page.wait_for_function(
-                    "() => typeof window.byted_acrawler?.frontierSign === 'function'",
+                    "() => typeof window.byted_acrawler?.frontierSign === 'function' || typeof window.bdms?.frontierSign === 'function'",
                     timeout=30000
                 )
-                logger.success("关键签名函数已在启动时成功加载！")
+                logger.success("关键签名函数已成功加载！")
             except TimeoutError:
                 logger.error("等待签名函数超时！这很可能是因为 Cookie 无效或已过期。")
                 raise RuntimeError("无法加载豆包签名函数，请检查并更新 Cookie。")
@@ -159,8 +175,15 @@ class PlaywrightManager:
                 final_query_string = urlencode(sorted_params)
                 url_with_params = f"{base_url}?{final_query_string}"
 
-                logger.info(f"正在使用静态指纹和排序后的参数调用 window.byted_acrawler.frontierSign: \"{final_query_string}\"")
-                signature_obj = await self.page.evaluate(f'window.byted_acrawler.frontierSign("{final_query_string}")')
+                logger.info(f"正在使用静态指纹和排序后的参数调用签名函数: \"{final_query_string}\"")
+                # 兼容新旧两种命名空间: byted_acrawler (旧) 和 bdms (新)
+                signature_obj = await self.page.evaluate(f'''
+                    (() => {{
+                        const signFn = window.byted_acrawler?.frontierSign || window.bdms?.frontierSign;
+                        if (!signFn) return null;
+                        return signFn("{final_query_string}");
+                    }})()
+                ''')
                 
                 if isinstance(signature_obj, dict) and ('a_bogus' in signature_obj or 'X-Bogus' in signature_obj):
                     bogus_value = signature_obj.get('a_bogus') or signature_obj.get('X-Bogus')
